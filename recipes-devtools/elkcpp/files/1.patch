@@ -1,0 +1,274 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 50987ea..48d195b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -17,8 +17,8 @@ include(CMakeParseArguments)
+ #  Custom build options  #
+ ##########################
+ 
+-set(GRPC_WRAPPER_BUILD_EXAMPLES true CACHE BOOL "Build included examples")
+-set(GRPC_WRAPPER_RUN_TESTS true CACHE BOOL "Build and run unit tests")
++set(GRPC_WRAPPER_BUILD_EXAMPLES false CACHE BOOL "Build included examples")
++set(GRPC_WRAPPER_RUN_TESTS false CACHE BOOL "Build and run unit tests")
+ option(PRINT_ERRORS_TO_CONSOLE "Set to print control status errors to cout" OFF)
+ 
+ if(${PRINT_ERRORS_TO_CONSOLE})
+@@ -40,6 +40,7 @@ add_compile_options(-Wall -Wextra)
+ set(GRPC_WRAPPER_PUBLIC_HEADER_DIR "${PROJECT_SOURCE_DIR}/include/sushi_controller")
+ 
+ set(PUBLIC_HEADER_FILES
++    ${GRPC_WRAPPER_PUBLIC_HEADER_DIR}/controller_types.h
+     ${GRPC_WRAPPER_PUBLIC_HEADER_DIR}/control_interface.h
+     ${GRPC_WRAPPER_PUBLIC_HEADER_DIR}/sushi_client.h
+ )
+diff --git a/include/sushi_controller/control_interface.h b/include/sushi_controller/control_interface.h
+index dd55c2e..2a48a53 100644
+--- a/include/sushi_controller/control_interface.h
++++ b/include/sushi_controller/control_interface.h
+@@ -540,6 +540,14 @@ public:
+     virtual std::pair<ControlStatus, ParameterInfo> get_parameter_info(int processor_id,
+                                                                        int parameter_id) const = 0;
+ 
++    /**
++     * @brief Get the value of all parameters available to a processor
++     *
++     * @param processor_id The id of the processor to get the parameters from
++     * @return std::pair<ControlStatus, std::vector<ParameterValue>>
++     */
++    virtual std::pair<ControlStatus, std::vector<ParameterValue>> get_parameter_values(int processor_id) const = 0;
++
+     /**
+      * @brief Get the current value of a parameter
+      *
+@@ -570,6 +578,14 @@ public:
+     virtual std::pair<ControlStatus, std::string> get_parameter_value_as_string(int processor_id,
+                                                                                 int parameter_id) const = 0;
+ 
++    /**
++     * @brief Set the value of the passed parameters
++     *
++     * @param param_values The parameters to be updated
++     * @return ControlStatus
++     */
++    virtual ControlStatus set_parameter_values(const std::vector<ParameterValue>& param_values) = 0;
++
+     /**
+      * @brief Set the value of a parameter
+      *
+diff --git a/include/sushi_controller/controller_types.h b/include/sushi_controller/controller_types.h
+index e8d1266..92100d8 100644
+--- a/include/sushi_controller/controller_types.h
++++ b/include/sushi_controller/controller_types.h
+@@ -102,6 +102,13 @@ struct ParameterInfo
+     float           max_domain_value;
+ };
+ 
++struct ParameterValue
++{
++    int   processor_id;
++    int   parameter_id;
++    float value;
++};
++
+ struct PropertyInfo
+ {
+     int         id;
+diff --git a/src/client/async_client_call_data.cpp b/src/client/async_client_call_data.cpp
+index 0be417a..22af007 100644
+--- a/src/client/async_client_call_data.cpp
++++ b/src/client/async_client_call_data.cpp
+@@ -1,3 +1,4 @@
++#include <thread>
+ #include "async_client_call_data.h"
+ #include "grpc_utils.h"
+ 
+@@ -162,24 +163,39 @@ void SubscribeToProcessorChangesCallData::proceed()
+     }
+ }
+ 
+-void SubscribeToParameterUpdatesCallData::proceed()
++void SubscribeToParameterUpdatesCallData::init()
+ {
+-    if (_status == CREATE)
++    // Format blacklist
++    auto request = sushi_rpc::ParameterNotificationBlocklist();
++    for (auto parameter : _parameter_blocklist)
+     {
+-        // Format blacklist
+-        auto request = sushi_rpc::ParameterNotificationBlocklist();
+-        for (auto parameter : _parameter_blocklist)
+-        {
+-            auto parameter_to_add = request.add_parameters();
+-            parameter_to_add->set_parameter_id(parameter.first);
+-            parameter_to_add->set_processor_id(parameter.second);
+-        }
+-        // Request response from server
+-        _reader = _stub->AsyncSubscribeToParameterUpdates(&_ctx, request, _cq, this);
+-        _status = PROCESS;
++        auto parameter_to_add = request.add_parameters();
++        parameter_to_add->set_parameter_id(parameter.first);
++        parameter_to_add->set_processor_id(parameter.second);
+     }
+-    else if (_status == PROCESS)
++
++    // Request response from server
++    // Note set the status first in case the processing of proceed happens
++    // just before the assignment of _reader
++    _reader = nullptr;
++    _status = PROCESS;
++    _reader = _stub->AsyncSubscribeToParameterUpdates(&_ctx, request, _cq, this);
++}
++
++void SubscribeToParameterUpdatesCallData::proceed()
++{
++    if (_status == PROCESS)
+     {
++        // Check if the reader variable has been assigned
++        // If we get here and it hasn't, then the subscription has taken place,
++        // but the variable assignment is pending
++        // Wait until the assignment has completed - which should be imminent
++        while (!_reader) {
++            // Wait for the variable assignment - 1ms probably too long but its fine
++            // in the context of the subscription process
++            std::this_thread::sleep_for(std::chrono::milliseconds(1));
++        }
++
+         // Read one notification
+         _reader->Read(&_response, this);
+ 
+@@ -196,9 +212,8 @@ void SubscribeToParameterUpdatesCallData::proceed()
+                     _response.value());
+         }
+     }
+-    else
++    else if (_status == FINISH)
+     {
+-        assert(_status == FINISH);
+         _ctx.TryCancel();
+     }
+ }
+diff --git a/src/client/async_client_call_data.h b/src/client/async_client_call_data.h
+index e38fb15..3dea109 100644
+--- a/src/client/async_client_call_data.h
++++ b/src/client/async_client_call_data.h
+@@ -176,7 +176,7 @@ public:
+       _parameter_blocklist(parameter_blacklist),
+       _first_iteration(true)
+     {
+-        proceed();
++        init();
+     }
+ 
+     void proceed() override;
+@@ -189,6 +189,8 @@ private:
+     std::vector<std::pair<int,int>> _parameter_blocklist;
+ 
+     bool _first_iteration;
++
++    void init();    
+ };
+ 
+ } // sushi_controller
+diff --git a/src/client/parameter_controller.cpp b/src/client/parameter_controller.cpp
+index f24073f..c4c327f 100644
+--- a/src/client/parameter_controller.cpp
++++ b/src/client/parameter_controller.cpp
+@@ -138,6 +138,34 @@ std::pair<ControlStatus, ParameterInfo> ParameterControllerClient::get_parameter
+     return std::pair<ControlStatus, ParameterInfo>(to_ext(status), output);
+ }
+ 
++std::pair<ControlStatus, std::vector<ParameterValue>> ParameterControllerClient::get_parameter_values(int processor_id) const
++{
++    sushi_rpc::ProcessorIdentifier request;
++    sushi_rpc::ParameterValueList response;
++    grpc::ClientContext context;
++
++    request.set_id(processor_id);
++
++    grpc::Status status = _stub.get()->GetParameterValues(&context, request, &response);
++
++    if(!status.ok())
++    {
++        handle_error(status);
++    }
++    std::vector<ParameterValue> output;
++    for(int i = 0; i < response.parameter_values_size(); ++i)
++    {
++        output.push_back(
++            ParameterValue {
++                response.parameter_values(i).parameter().processor_id(),
++                response.parameter_values(i).parameter().parameter_id(),
++                response.parameter_values(i).value()
++            }
++        );
++    }
++    return std::pair<ControlStatus, std::vector<ParameterValue>>(to_ext(status), output);
++}
++
+ std::pair<ControlStatus, float> ParameterControllerClient::get_parameter_value(int processor_id, int parameter_id) const
+ {
+     sushi_rpc::ParameterIdentifier request;
+@@ -192,6 +220,29 @@ std::pair<ControlStatus, std::string> ParameterControllerClient::get_parameter_v
+     return std::pair<ControlStatus, std::string>(to_ext(status), response.value());
+ }
+ 
++ControlStatus ParameterControllerClient::set_parameter_values(const std::vector<ParameterValue>& param_values)
++{
++    sushi_rpc::ParameterValueList request;
++    sushi_rpc::GenericVoidValue response;
++    grpc::ClientContext context;
++
++    for(const ParameterValue& pv : param_values)
++    {
++        auto resp_param_value = request.add_parameter_values();
++        resp_param_value->mutable_parameter()->set_processor_id(pv.processor_id);
++        resp_param_value->mutable_parameter()->set_parameter_id(pv.parameter_id);
++        resp_param_value->set_value(pv.value);
++    }
++
++    grpc::Status status = _stub.get()->SetParameterValues(&context, request, &response);
++
++    if(!status.ok())
++    {
++        handle_error(status);
++    }
++    return to_ext(status);
++}
++
+ ControlStatus ParameterControllerClient::set_parameter_value(int processor_id, int parameter_id, float value)
+ {
+     sushi_rpc::ParameterValue request;
+diff --git a/src/client/parameter_controller.h b/src/client/parameter_controller.h
+index 5b90bde..3c86d4d 100644
+--- a/src/client/parameter_controller.h
++++ b/src/client/parameter_controller.h
+@@ -49,6 +49,14 @@ public:
+     virtual std::pair<ControlStatus, ParameterInfo> get_parameter_info(int processor_id,
+                                                                        int parameter_id) const override;
+ 
++    /**
++     * @brief Get the value of all parameters available to a processor
++     *
++     * @param processor_id The id of the processor to get the parameters from
++     * @return std::pair<ControlStatus, std::vector<ParameterValue>>
++     */
++    virtual std::pair<ControlStatus, std::vector<ParameterValue>> get_parameter_values(int processor_id) const override;
++
+     /**
+      * @brief Get the current value of a parameter
+      *
+@@ -79,6 +87,14 @@ public:
+     virtual std::pair<ControlStatus, std::string> get_parameter_value_as_string(int processor_id,
+                                                                                 int parameter_id) const override;
+ 
++    /**
++     * @brief Set the value of the passed parameters
++     *
++     * @param param_values The parameters to be updated
++     * @return ControlStatus
++     */
++    virtual ControlStatus set_parameter_values(const std::vector<ParameterValue>& param_values) override;
++
+     /**
+      * @brief Set the value of a parameter
+      *
