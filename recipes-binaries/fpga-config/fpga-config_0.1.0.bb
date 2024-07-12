@@ -6,7 +6,7 @@ LIC_FILES_CHKSUM = ""
 
 # Note: Same as SRCREV; Overide in meta-<product>
 PV = ""
-SRC_URI = "https://github.com/Melbourne-Instruments/fpga_config.git"
+SRC_URI = "git://github.com/Melbourne-Instruments/fpga_config.git"
 
 # NOTE: Override this in the meta-<product> layer with a
 # .bbappend recipe choosing the specific commit required

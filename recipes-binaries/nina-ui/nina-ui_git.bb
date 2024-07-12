@@ -16,7 +16,7 @@ KERNEL_MODULE_AUTOLOAD += "i2c_dev"
 
 # Note: Same as SRCREV; Overide in meta-<product>
 PV = ""
-SRC_URI = "https://github.com/Melbourne-Instruments/nina_ui.git"
+SRC_URI = "gitsm://github.com/Melbourne-Instruments/nina_ui.git"
 
 # NOTE: Override this in the meta-<product> layer with a
 # .bbappend recipe choosing the specific commit required

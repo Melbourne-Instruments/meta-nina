@@ -7,7 +7,7 @@ DEPENDS = "xenomai-lib"
 #Note: Same as SRCREV; Overiden from meta-<product>
 PV = ""
 
-SRC_URI = "https://github.com/Melbourne-Instruments/raspa.git"
+SRC_URI = "git://github.com/Melbourne-Instruments/raspa.git"
 
 # NOTE: This is most likely overiden as desired from meta-<product> layer with a .bbappend recipe"
 SRCREV = ""
